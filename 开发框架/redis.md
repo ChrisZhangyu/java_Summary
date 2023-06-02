@@ -160,3 +160,24 @@ quicklistNode的字段
 * 扩容和收缩都是成倍的（即新的哈希表容量是原来的2倍或者一半）
 * 渐进式rehash：  
   如果hash表的长度很长，那么redis不会一次性完成所有键的rehash操作。会先创建一个新的hash表，查找更新删除先在旧表找，如果没找到就在新表找。但是增加操作一定是在新的表上。
+## 跳表
+详细见数据库章节。
+## 为什么redis不用红黑树、b+树、二叉平衡树等而用跳表
+作者原话：
+```C
+There are a few reasons:
+
+They are not very memory intensive. It's up to you basically. Changing parameters about the probability of a node to have a given number of levels will make then less memory intensive than btrees.
+跳表不是特别耗费内存，基本上取决你设置的参数。通过改变每个节点建立索引的概率，可以使跳变占用的内存少于b树。
+
+A sorted set is often target of many ZRANGE or ZREVRANGE operations, that is, traversing the skip list as a linked list. With this operation the cache locality of skip lists is at least as good as with other kind of balanced trees.
+在范围遍历时，跳表的性能与其它平衡树没什么区别，而是实现上更加简单。
+
+They are simpler to implement, debug, and so forth. For instance thanks to the skip list simplicity I received a patch (already in Redis master) with augmented skip lists implementing ZRANK in O(log(N)). It required little changes to the code.
+跳表比较容易实现和debug。我曾经收到过一个补丁，增强了zrank的操作，使其在logn内实现。多亏了跳表的简单性，我仅仅需要修改少部分代码。
+
+About the Append Only durability & speed, I don't think it is a good idea to optimize Redis at cost of more code and more complexity for a use case that IMHO should be rare for the Redis target (fsync() at every command). Almost no one is using this feature even with ACID SQL databases, as the performance hint is big anyway.
+About threads: our experience shows that Redis is mostly I/O bound. I'm using threads to serve things from Virtual Memory. The long term solution to exploit all the cores, assuming your link is so fast that you can saturate a single core, is running multiple instances of Redis (no locks, almost fully scalable linearly with number of cores), and using the "Redis Cluster" solution that I plan to develop in the future.
+
+```
+# Redis对象机制与底层结构的对应
