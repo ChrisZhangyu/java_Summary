@@ -178,6 +178,75 @@ They are simpler to implement, debug, and so forth. For instance thanks to the s
 
 About the Append Only durability & speed, I don't think it is a good idea to optimize Redis at cost of more code and more complexity for a use case that IMHO should be rare for the Redis target (fsync() at every command). Almost no one is using this feature even with ACID SQL databases, as the performance hint is big anyway.
 About threads: our experience shows that Redis is mostly I/O bound. I'm using threads to serve things from Virtual Memory. The long term solution to exploit all the cores, assuming your link is so fast that you can saturate a single core, is running multiple instances of Redis (no locks, almost fully scalable linearly with number of cores), and using the "Redis Cluster" solution that I plan to develop in the future.
-
 ```
 # Redis对象机制与底层结构的对应
+## String类型的底层实现
+String有三种编码类型
+ * INT  
+   只保存整数型的字符串，主要用于共享整数。
+ * EMBSTR  
+   小于等于44字节的字符串都是用EMBSTR。并且redis中，EMBSTR不能修改。
+ * RAW  
+   长度超过44的字符串均使用RAW。此外，如果对EMBSTR修改则会转换成RAW形式，无论是否达到了44字节。  
+<font color=00afff>RAW和EMBSTR的区别</font>:  
+&emsp;redisObjcet对象在存储RAW与EMBSTR的指针时不相同。EMBSTR是与redisObject连续存储。RAW则是单独存储。因此RAW每次分配两次内存而EMBSTR仅需分配一次。但是EMBSTR修改时整个redisObject都要修改，因此redis不提供任何修改EMBSTR的方法。
+![avatar](images/redis字符串不同编码.png)
+
+## list类型的低层实现
+底层就是quicklist
+![avatar](images/list的内存布局.png)
+## 哈希对象
+有两种方式
+   * ziplist
+     ![avatar](images/哈希表1.png)
+       满足两个条件
+       1. 列表保存的元素小于512
+       2. 每个元素的长度小于64(即entry的encoding只有一个字节)
+   * dict  
+     ![avatar](images/哈希表2.png)
+
+## 集合
+* 无序集合
+  1. intset
+  2. dict 
+* 有序集合
+  1. ziplist
+  2. dict+skiplist  
+     采用这种方式的原始是即能够在o(1)找到元素，又能够按序遍历。结合了哈希表和跳表的优点
+     ![avatar](images/zset.png)
+
+# Redis持久化机制
+主要有两种方式
+   * RDB方式  
+      RDB方式是给当前redis做内存快照。有两个命令save和bgsave可以主动触发RDB持久化。save是主进程会阻塞进行快照保存。而bgsave则是会fork一个子进程进行快照操作，通常适用于数据量非常大时。  
+      自动触发的情况：   
+      * save m n m秒内有n次修改时就自动快照
+      * 主从复制从节点需要主节点进行全量复制
+      * 如果没有开启AOF执行shutdown会自动bgsave  
+   > <font color=a001fa>RDB在快照时如何保证主进程能够接受客户端的写操作?</font>  
+      &emsp; 通过写时拷贝COW技术，这实际上是linux系统中实现的技术。即fork出的子进程在父进程不发生写操作时，公用同一片内存区域。只有当发生写操作时，写的那片区域才会复制一份给子进程。
+      ![avatar](images/写时复制.jpg)  
+      <font color=a001fa>在进行快照操作的这段时间，如果发生服务崩溃怎么办？</font>    
+      恢复上一次的快照，即每次快照只有完全完成才会替换原有快照。  
+      
+   * AOF方式  
+      通过记录每次执行的指令进行持久化，即命令日志。AOF方式是写后日志，而mysql是写前日志。采用写后日志的原因是追求高性能，因为redis AOF方式不会对命令进行检查(这就节省了很大的开销)，如果写前日志则有可能记录错误的命令。  
+      AOF的时机:
+      * always
+        每条指令都记录 
+      * everysec  
+         每秒记录一次 
+      * no  
+         由操作系统决定
+   >  <font color=a001fa>AOF重写</font>     
+   当aof文件越来越大时，redis会对aof文件进行重写，去除冗余的命令。
+   ![avatar](images/AOF重写.jpg)
+   <font color=a001fa>AOF重写会阻塞吗？</font>  
+   在fork子进程时会阻塞，其余不会。  
+   <font color=a001fa>AOF重写时有新的写操作怎么办？</font>  
+   redis会将新的写指令复制两份放入新AOF的缓冲区和旧AOF的缓冲区，保持一致性。  
+   <font color=a001fa>AOF如何触发重写</font>  
+   auto-aof-rewrite-min-size:表示运行AOF重写时文件的最小大小，默认为64MB。    
+   auto-aof-rewrite-percentage:这个值的计算方式是，当前aof文件大小和上一次重写后aof文件大小的差值，再除以上一次重写后aof文件大小。也就是当前aof文件比上一次重写后aof文件的增量大小，和上一次重写后aof文件大小的比值。
+   * 混合方式   
+     内存快照以一定的频率执行，在两次快照之间，使用 AOF 日志记录这期间的所有命令操作。快照不用很频繁地执行，这就避免了频繁 fork 对主线程的影响。而且，AOF 日志也只用记录两次快照间的操作，也就是说，不需要记录所有操作了，因此，就不会出现文件过大的情况了，也可以避免重写开销。
